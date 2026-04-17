@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-04-16T16:45:39.551812+00:00",
+  "site": "dp58",
+  "target_owner": {
+    "owner_id": 49926,
+    "owner_name": "庄园"
+  },
+  "cookie_source": {
+    "type": "json",
+    "path": "configs/dp58.cookies.local.json"
+  },
+  "current_user": {
+    "id": 49926,
+    "oa_name": "zz_zhuangyuan01",
+    "chinese_name": "庄园",
+    "current_org_id": 1095,
+    "current_org_name": "转转大数据研发部"
+  },
+  "query": {
+    "name": null,
+    "page_size": 5000,
+    "limit": null,
+    "org_ids": []
+  },
+  "orgs_scanned": [
+    {
+      "org_id": 33,
+      "org_name": "转转技术部",
+      "is_current": true
+    },
+    {
+      "org_id": 1095,
+      "org_name": "转转大数据研发部",
+      "is_current": false
+    }
+  ],
+  "total_tasks": 662,
+  "task_count_by_org": {
+    "转转大数据研发部": 658,
+    "转转技术部": 4
+  },
+  "output_files": {
+    "json": "outputs/dp58_zhuangyuan_tasks_all_orgs.json",
+    "csv": "outputs/dp58_zhuangyuan_tasks_all_orgs.csv",
+    "summary_json": "outputs/dp58_zhuangyuan_tasks_all_orgs_summary.json"
+  }
+}
