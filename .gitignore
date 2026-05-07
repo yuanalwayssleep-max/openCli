@@ -2,3 +2,6 @@ node_modules/
 configs/
 __pycache__/
 *.pyc
+.DS_Store
+outputs/.tmp/
+outputs/eastmoney_*.csv
