@@ -18,10 +18,10 @@ OUTPUT_PATH = Path(__file__).resolve().parents[1] / "outputs" / "eastmoney_hs_bj
 
 REQUEST_PARAMS = {
     "np": "1",
-    "fltt": "1",
+    "fltt": "2",
     "invt": "2",
     "fs": "m:0+t:6+f:!2,m:0+t:80+f:!2,m:1+t:2+f:!2,m:1+t:23+f:!2,m:0+t:81+s:262144+f:!2",
-    "fields": "f12,f13,f14,f1,f2,f4,f3,f152,f5,f6,f7,f15,f18,f16,f17,f10,f8,f9,f23",
+    "fields": "f12,f13,f14,f1,f2,f4,f3,f152,f5,f6,f7,f15,f18,f16,f17,f10,f8,f9,f23,f100,f102,f103",
     "fid": "f12",
     "po": "1",
     "dect": "1",
@@ -49,6 +49,9 @@ FIELD_MAP = {
     "f8": "换手率",
     "f9": "市盈率",
     "f23": "市净率",
+    "f100": "行业",
+    "f102": "地域板块",
+    "f103": "概念题材",
 }
 
 
