@@ -6,5 +6,3 @@ __pycache__/
 outputs/.tmp/
 outputs/eastmoney_*.csv
 outputs/model_5d_return/
-skills/a-share-kline-return-modeling/outputs/
-data/a股快照_*.csv
