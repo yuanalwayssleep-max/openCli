@@ -40,9 +40,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-suffix", default="", help="输出10修正文件的后缀，例如 _严格清洗")
     parser.add_argument(
         "--correction-policy",
-        choices=["full", "high_confidence"],
-        default="full",
-        help="修正策略：full=原完整规则；high_confidence=只保留高置信修正",
+        choices=["full", "high_confidence", "v15"],
+        default="v15",
+        help="修正策略：full=原完整规则；high_confidence=旧高置信修正；v15=跨年稳定版高置信修正",
     )
     parser.add_argument("--label-csv", default="00_5日涨跌方向预测样本明细.csv", help="5日标签样本文件名")
     parser.add_argument("--feature-csv", default="00_5日方向模型特征表.csv", help="5日方向特征文件名")
@@ -698,12 +698,10 @@ def high_confidence_reason(row: pd.Series, reason: str) -> str:
             )
         )
 
-    # 恐慌+弱势延续改下跌需要避开极端恐慌释放日；极端恐慌更可能次日/后续反抽。
+    # 恐慌+弱势延续在跨年回测中不稳定：2025-10-17 曾把高胜率上涨日误杀为下跌。
+    # 这类环境不再在方向修正层强制翻空，先保留原始模型判断。
     if reason == "恐慌释放且弱势延续，并且大中小盘20日趋势转弱，原始上涨改下跌":
-        allowed = bool(
-            row.get("当日平均涨跌幅", 0) > -3.50
-            and row.get("上证指数_10日涨跌幅", 0) > -0.05
-        )
+        allowed = False
 
     # 过热回落只在大中小盘都已经明显高位延伸时触发；避免4月中旬反弹延续期误杀。
     if reason.startswith("过热回落高且指数高位延伸"):
@@ -730,7 +728,9 @@ def high_confidence_reason(row: pd.Series, reason: str) -> str:
     if reason == "趋势回调但行业相对强，原始下跌改上涨":
         allowed = bool(
             row["市场风险标签"] == "常规环境"
-            and row.get("当日上涨比例", 1) < 0.45
+            and 0.25 <= row.get("当日上涨比例", 1) < 0.45
+            and row.get("当日平均涨跌幅", 0) > -0.50
+            and row.get("上涨行业比例", 0) > 0.45
             and row.get("上证指数_20日涨跌幅", 0) > 0.02
             and row.get("中证500_20日涨跌幅", 0) > 0.05
             and row.get("中证1000_20日涨跌幅", 0) > 0.05
@@ -883,7 +883,7 @@ def main() -> None:
     merged["原始预测涨跌"] = merged["预测涨跌"]
     merged["原始预测是否准确"] = merged["涨跌预测是否准确"].astype(int)
     merged["完整规则修正原因"] = merged.apply(lambda row: correction_reason(row, args.overheat_threshold), axis=1)
-    if args.correction_policy == "high_confidence":
+    if args.correction_policy in {"high_confidence", "v15"}:
         merged["修正原因"] = merged.apply(lambda row: high_confidence_reason(row, row["完整规则修正原因"]), axis=1)
     else:
         merged["修正原因"] = merged["完整规则修正原因"]

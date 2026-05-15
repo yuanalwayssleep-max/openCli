@@ -71,10 +71,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--feature-set",
-        choices=["all", "core", "stock_only", "relative_core"],
+        choices=["all", "core", "core_v14", "stock_only", "relative_core"],
         default="core",
         help=(
-            "特征集合：core=核心关键特征；stock_only=去掉市场/行业/指数环境；"
+            "特征集合：core=核心关键特征；core_v14=相对价格/分位/背离实验版；stock_only=去掉市场/行业/指数环境；"
             "relative_core=保留相对强弱、去掉市场绝对方向；all=全部数值特征；默认core"
         ),
     )
@@ -184,6 +184,61 @@ CORE_FEATURE_COLUMNS = [
     "个股强于中证1000_5日相对强弱",
 ]
 
+CORE_V14_FEATURE_COLUMNS = [
+    "振幅",
+    "涨跌幅",
+    "换手率",
+    "open_to_close_pct",
+    "high_to_close_pct",
+    "low_to_close_pct",
+    "volume_hist_rank_20",
+    "amount_hist_rank_20",
+    "turnover_bias_20",
+    "ret_1",
+    "ret_3",
+    "ret_5",
+    "ret_10",
+    "ret_20",
+    "ret_5_rank_20",
+    "close_ma_ratio_5",
+    "close_ma_ratio_10",
+    "close_ma_ratio_20",
+    "vol_ratio_5",
+    "amount_ratio_5",
+    "vol_ratio_10",
+    "amount_ratio_10",
+    "vol_change_1",
+    "amount_change_1",
+    "volatility_5",
+    "volatility_10",
+    "volatility_10_rank_20",
+    "amp_mean_5",
+    "amp_mean_10",
+    "body_pct",
+    "upper_shadow_pct",
+    "lower_shadow_pct",
+    "close_position_in_day",
+    "range_pos_20",
+    "dist_high_20",
+    "dist_low_20",
+    "price_volume_divergence",
+    "全市场平均涨跌幅",
+    "全市场上涨比例",
+    "行业平均涨跌幅",
+    "行业上涨比例",
+    "个股强于行业",
+    "同行业历史5日上涨率",
+    "上证指数_1日涨跌幅",
+    "上证指数_5日涨跌幅",
+    "沪深300_1日涨跌幅",
+    "沪深300_5日涨跌幅",
+    "中证500_5日涨跌幅",
+    "中证1000_5日涨跌幅",
+    "个股强于沪深300_5日相对强弱",
+    "个股强于中证500_5日相对强弱",
+    "个股强于中证1000_5日相对强弱",
+]
+
 MARKET_ABSOLUTE_FEATURE_COLUMNS = {
     "全市场平均涨跌幅",
     "全市场上涨比例",
@@ -214,6 +269,14 @@ def build_core_feature_columns(df: pd.DataFrame) -> list[str]:
     ]
 
 
+def build_core_v14_feature_columns(df: pd.DataFrame) -> list[str]:
+    return [
+        col
+        for col in CORE_V14_FEATURE_COLUMNS
+        if col in df.columns and pd.api.types.is_numeric_dtype(df[col])
+    ]
+
+
 def build_stock_only_feature_columns(df: pd.DataFrame) -> list[str]:
     excluded = MARKET_ABSOLUTE_FEATURE_COLUMNS | RELATIVE_STRENGTH_FEATURE_COLUMNS
     return [
@@ -233,7 +296,7 @@ def build_relative_core_feature_columns(df: pd.DataFrame) -> list[str]:
 
 
 def feature_file_tag(feature_set: str) -> str:
-    if feature_set in {"core", "stock_only", "relative_core"}:
+    if feature_set in {"core", "core_v14", "stock_only", "relative_core"}:
         return "_核心特征"
     return ""
 
@@ -436,6 +499,8 @@ def main() -> None:
 
     if args.feature_set == "core":
         feature_cols = build_core_feature_columns(base_train_df)
+    elif args.feature_set == "core_v14":
+        feature_cols = build_core_v14_feature_columns(base_train_df)
     elif args.feature_set == "stock_only":
         feature_cols = build_stock_only_feature_columns(base_train_df)
     elif args.feature_set == "relative_core":

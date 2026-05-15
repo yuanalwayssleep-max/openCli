@@ -81,6 +81,15 @@ def compute_streak(series: pd.Series) -> pd.Series:
     return pd.Series(streak, index=series.index)
 
 
+def rolling_pct_rank(series: pd.Series, window: int) -> pd.Series:
+    """当前值在过去window个交易日中的分位，只使用当前及历史数据。"""
+
+    return series.rolling(window, min_periods=max(5, window // 2)).apply(
+        lambda values: pd.Series(values).rank(pct=True).iloc[-1],
+        raw=False,
+    )
+
+
 def enrich_one_stock(df: pd.DataFrame, code: str, meta: dict[str, str]) -> pd.DataFrame:
     df = df.copy()
     df["代码"] = code
@@ -132,6 +141,12 @@ def enrich_one_stock(df: pd.DataFrame, code: str, meta: dict[str, str]) -> pd.Da
 
     df["vol_change_1"] = vol.pct_change()
     df["amount_change_1"] = amount.pct_change()
+    df["open_to_close_pct"] = open_ / close.replace(0, np.nan) - 1
+    df["high_to_close_pct"] = high / close.replace(0, np.nan) - 1
+    df["low_to_close_pct"] = low / close.replace(0, np.nan) - 1
+    df["volume_hist_rank_20"] = rolling_pct_rank(vol, 20)
+    df["amount_hist_rank_20"] = rolling_pct_rank(amount, 20)
+    df["turnover_bias_20"] = df["换手率"] / df["换手率"].rolling(20).mean().replace(0, np.nan) - 1
     df["price_volume_same_direction"] = np.where(ret * df["vol_change_1"] > 0, 1.0, 0.0)
     df["price_up_volume_expand"] = np.where((ret > 0) & (df["vol_change_1"] > 0), 1.0, 0.0)
     df["price_up_volume_shrink"] = np.where((ret > 0) & (df["vol_change_1"] < 0), 1.0, 0.0)
@@ -141,6 +156,14 @@ def enrich_one_stock(df: pd.DataFrame, code: str, meta: dict[str, str]) -> pd.Da
     df["amount_ma5_ma20_gap"] = amount.rolling(5).mean() / amount.rolling(20).mean() - 1
     df["ret_5_vol_ratio_5"] = df["ret_5"] * df["vol_ratio_5"]
     df["ret_5_amount_ratio_5"] = df["ret_5"] * df["amount_ratio_5"]
+    df["price_volume_divergence"] = np.select(
+        [
+            (df["ret_5"] > 0.03) & (df["vol_ma5_ma20_gap"] < -0.10),
+            (df["ret_5"] < -0.03) & (df["vol_ma5_ma20_gap"] > 0.10),
+        ],
+        [-1.0, 1.0],
+        default=0.0,
+    )
 
     df["body_pct"] = (close - open_) / open_.replace(0, np.nan)
     df["upper_shadow_pct"] = (high - np.maximum(close, open_)) / open_.replace(0, np.nan)
@@ -177,6 +200,9 @@ def enrich_one_stock(df: pd.DataFrame, code: str, meta: dict[str, str]) -> pd.Da
         df[f"dist_high_{n}"] = close / rolling_high - 1
         df[f"dist_low_{n}"] = close / rolling_low - 1
         df[f"range_pos_{n}"] = (close - rolling_low) / denom
+
+    df["ret_5_rank_20"] = rolling_pct_rank(df["ret_5"], 20)
+    df["volatility_10_rank_20"] = rolling_pct_rank(df["volatility_10"], 20)
 
     df["breakout_10"] = (close >= high.shift(1).rolling(10).max()).astype(float)
     df["breakout_20"] = (close >= high.shift(1).rolling(20).max()).astype(float)

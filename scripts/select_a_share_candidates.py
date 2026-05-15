@@ -15,6 +15,8 @@ DEFAULT_ALL_SCORES_OUTPUT = ROOT / "data" / "a_share_full_score_detail.csv"
 REFRESH_SCRIPT = ROOT / "scripts" / "fetch_eastmoney_a_shares.py"
 KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 UT = "fa5fd1943c7b386f172d6893dbfba10b"
+PRICE_MIN = 15
+PRICE_MAX = 45
 
 
 @dataclass
@@ -37,6 +39,8 @@ class Candidate:
     day_high: float
     day_low: float
     prev_close: float
+    theme_score: float
+    theme_detail: str
     score: float
     score_detail: str
     reason: str
@@ -217,17 +221,17 @@ def passes_position_filters(metrics: dict[str, float | bool], amplitude: float, 
     latest_pct = float(metrics["latest_pct"])
     recent_high_position_days = int(metrics["recent_high_position_days"])
 
-    if pos20 > 90 and dist_ma20 > 8:
+    if pos20 > 95 and dist_ma20 > 10:
         return False
-    if cum5 > 8:
+    if cum5 > 12:
         return False
-    if pos20 > 90 and cum5 > 5:
+    if pos20 > 92 and cum5 > 8:
         return False
-    if amount_ratio > 1.2 and latest_pct < 1 and pos20 > 85:
+    if amount_ratio > 1.8 and latest_pct < 0.5 and pos20 > 90:
         return False
-    if recent_high_position_days >= 2 and cum3 < 3:
+    if recent_high_position_days >= 3 and cum3 < 1:
         return False
-    if pos20 > 90 and amplitude < 2.6 and high_pullback_pct > -1:
+    if pos20 > 95 and amplitude < 1.2 and high_pullback_pct > -0.5:
         return False
     return True
 
@@ -248,8 +252,8 @@ def build_reason(price: float, amount: float, amplitude: float, turnover: float,
         reasons.append("涨幅未过热")
     if 1 <= volume_ratio <= 1.8:
         reasons.append("量比健康")
-    if 10 <= price <= 60:
-        reasons.append("价格区间适合练手")
+    if PRICE_MIN <= price <= PRICE_MAX:
+        reasons.append("价格区间适合重仓隔夜")
     return "、".join(reasons)
 
 
@@ -324,6 +328,109 @@ def concept_set(raw: str) -> set[str]:
     return {item.strip() for item in (raw or "").split(",") if item.strip() and item.strip() not in GENERIC_CONCEPTS}
 
 
+def build_theme_context(rows: list[dict[str, str]]) -> dict[str, dict[str, dict[str, float | int | list[float]]]]:
+    industries: dict[str, dict[str, float | int | list[float]]] = {}
+    concepts: dict[str, dict[str, float | int | list[float]]] = {}
+    for row in rows:
+        name = row.get("名称", "")
+        if name.startswith(("ST", "*ST", "SST", "N", "C")) or row.get("板块") == "北交所":
+            continue
+        pct = to_float(row.get("涨跌幅", ""))
+        amount = to_float(row.get("成交额", ""))
+        if pct is None or amount is None:
+            continue
+        industry = row.get("行业", "")
+        if industry:
+            stat = industries.setdefault(industry, {"count": 0, "sum_pct": 0.0, "up_count": 0, "amount": 0.0, "pcts": [], "amounts": []})
+            stat["count"] = int(stat["count"]) + 1
+            stat["sum_pct"] = float(stat["sum_pct"]) + pct
+            stat["up_count"] = int(stat["up_count"]) + (1 if pct > 0 else 0)
+            stat["amount"] = float(stat["amount"]) + amount
+            stat["pcts"].append(pct)  # type: ignore[union-attr]
+            stat["amounts"].append(amount)  # type: ignore[union-attr]
+        for concept in concept_set(row.get("概念题材", "")):
+            stat = concepts.setdefault(concept, {"count": 0, "sum_pct": 0.0, "up_count": 0, "amount": 0.0})
+            stat["count"] = int(stat["count"]) + 1
+            stat["sum_pct"] = float(stat["sum_pct"]) + pct
+            stat["up_count"] = int(stat["up_count"]) + (1 if pct > 0 else 0)
+            stat["amount"] = float(stat["amount"]) + amount
+    return {"industry": industries, "concept": concepts}
+
+
+def percentile_rank_desc(value: float, values: list[float]) -> float:
+    if not values:
+        return 100
+    ordered = sorted(values, reverse=True)
+    better_or_equal = 0
+    for item in ordered:
+        if item >= value:
+            better_or_equal += 1
+        else:
+            break
+    return better_or_equal / len(ordered) * 100
+
+
+def theme_leadership_score(row: dict[str, str], context: dict[str, dict[str, dict[str, float | int | list[float]]]]) -> tuple[float, str]:
+    pct = to_float(row.get("涨跌幅", "")) or 0
+    amount = to_float(row.get("成交额", "")) or 0
+    industry = row.get("行业", "")
+    industry_score = 0
+    front_score = 0
+    concept_score = 0
+    details: list[str] = []
+
+    industry_stat = context["industry"].get(industry)
+    if industry_stat:
+        count = int(industry_stat["count"])
+        avg_pct = float(industry_stat["sum_pct"]) / count if count else 0
+        up_ratio = int(industry_stat["up_count"]) / count if count else 0
+        total_amount_yi = float(industry_stat["amount"]) / 100000000
+        if count >= 5 and avg_pct >= 1.0 and up_ratio >= 0.60 and total_amount_yi >= 80:
+            industry_score = 6
+        elif count >= 4 and avg_pct >= 0.5 and up_ratio >= 0.55:
+            industry_score = 4
+        elif avg_pct >= 0 and up_ratio >= 0.50:
+            industry_score = 2
+
+        pcts = industry_stat.get("pcts", [])
+        amounts = industry_stat.get("amounts", [])
+        pct_rank = percentile_rank_desc(pct, pcts if isinstance(pcts, list) else [])
+        amount_rank = percentile_rank_desc(amount, amounts if isinstance(amounts, list) else [])
+        if pct_rank <= 20 and amount_rank <= 35:
+            front_score = 4
+        elif pct_rank <= 35 or amount_rank <= 25:
+            front_score = 2
+        details.append(f"行业{industry}均涨{avg_pct:.2f}%上涨率{up_ratio:.0%}前排{pct_rank:.0f}%/{amount_rank:.0f}%")
+
+    best_concept = ""
+    for concept in concept_set(row.get("概念题材", "")):
+        stat = context["concept"].get(concept)
+        if not stat:
+            continue
+        count = int(stat["count"])
+        if count < 8:
+            continue
+        avg_pct = float(stat["sum_pct"]) / count if count else 0
+        up_ratio = int(stat["up_count"]) / count if count else 0
+        amount_yi = float(stat["amount"]) / 100000000
+        score = 0
+        if avg_pct >= 1.0 and up_ratio >= 0.60 and amount_yi >= 150:
+            score = 5
+        elif avg_pct >= 0.5 and up_ratio >= 0.55:
+            score = 3
+        elif avg_pct >= 0 and up_ratio >= 0.50:
+            score = 1
+        if score > concept_score:
+            concept_score = score
+            best_concept = f"{concept}均涨{avg_pct:.2f}%上涨率{up_ratio:.0%}"
+
+    if best_concept:
+        details.append(f"强概念{best_concept}")
+    total = industry_score + front_score + concept_score
+    details.append(f"主线{total}/15")
+    return total, "；".join(details)
+
+
 def relation_reason(left: Candidate, right: Candidate) -> str:
     if left.industry and right.industry and left.industry == right.industry:
         return f"同行业:{left.industry}"
@@ -366,6 +473,8 @@ def score_candidate(
     high_pullback_pct: float,
     day_high_space_pct: float,
     amount_rank_pct: float,
+    theme_score: float,
+    theme_detail: str,
     day_low: float,
     price: float,
     metrics: dict[str, float | bool],
@@ -384,8 +493,10 @@ def score_candidate(
 
     if 3 <= turnover <= 6:
         turnover_score = 5
-    else:
+    elif 2 <= turnover < 3 or 6 < turnover <= 7.5:
         turnover_score = 3
+    else:
+        turnover_score = 1
 
     if 1.1 <= volume_ratio <= 1.6:
         volume_score = 4
@@ -396,8 +507,10 @@ def score_candidate(
 
     if 0.8 <= pct_chg <= 2.4:
         pct_score = 8
-    else:
+    elif 0.3 <= pct_chg < 0.8 or 2.4 < pct_chg <= 3.2:
         pct_score = 5
+    else:
+        pct_score = 2
 
     if 2.6 <= amplitude <= 4.0:
         amplitude_score = 5
@@ -410,8 +523,10 @@ def score_candidate(
         close_position_score = 8
     elif close_position_pct >= 65:
         close_position_score = 6
-    else:
+    elif close_position_pct >= 55:
         close_position_score = 3
+    else:
+        close_position_score = 1
 
     # 快照无法识别14:30后的5分钟主动抢筹，先给基础尾盘近似分；
     # Top候选再补抓5分钟K自动确认尾盘量价。
@@ -442,8 +557,10 @@ def score_candidate(
         risk_reward_score = 13
     elif day_high_space_pct >= 1.0:
         risk_reward_score = 8
+    elif day_high_space_pct >= 0.5:
+        risk_reward_score = 5
     else:
-        risk_reward_score = 3
+        risk_reward_score = 1
 
     total = (
         liquidity_amount
@@ -455,6 +572,7 @@ def score_candidate(
         + tail_proxy_score
         + history_score
         + risk_reward_score
+        + theme_score
     )
     total = min(100, round(total, 2))
 
@@ -469,6 +587,7 @@ def score_candidate(
             f"尾盘近似{tail_proxy_score}/20",
             f"历史风险{history_score}/22",
             f"空间盈亏比{risk_reward_score}/13",
+            theme_detail,
         ]
     )
     return total, "；".join(details)
@@ -487,6 +606,8 @@ def append_score_record(
     day_high_space_pct: float | None = None,
     open_to_price_pct: float | None = None,
     amount_rank_pct: float | None = None,
+    theme_score: float | None = None,
+    theme_detail: str = "",
     metrics: dict[str, float | bool] | None = None,
 ) -> None:
     if records is None:
@@ -526,6 +647,8 @@ def append_score_record(
             "到日内高点空间(%)": "" if day_high_space_pct is None else f"{day_high_space_pct:.2f}",
             "开盘至当前(%)": "" if open_to_price_pct is None else f"{open_to_price_pct:.2f}",
             "成交额分位(%)": "" if amount_rank_pct is None else f"{amount_rank_pct:.2f}",
+            "主线评分": "" if theme_score is None else f"{theme_score:.2f}",
+            "主线明细": theme_detail,
             "近20日位置(%)": "" if not metrics.get("history_available") else f"{float(metrics['pos20']):.2f}",
             "近5日涨幅(%)": "" if not metrics.get("history_available") else f"{float(metrics['cum5']):.2f}",
             "偏离MA20(%)": "" if not metrics.get("history_available") else f"{float(metrics['dist_ma20']):.2f}",
@@ -561,6 +684,8 @@ def write_all_scores(path: Path, records: list[dict[str, str]]) -> None:
         "到日内高点空间(%)",
         "开盘至当前(%)",
         "成交额分位(%)",
+        "主线评分",
+        "主线明细",
         "近20日位置(%)",
         "近5日涨幅(%)",
         "偏离MA20(%)",
@@ -581,6 +706,7 @@ def load_candidates(path: Path, score_records: list[dict[str, str]] | None = Non
         total_market_amount = sum(amounts)
         amount_floor = dynamic_amount_floor(total_market_amount)
         sorted_amounts_desc = sorted(amounts, reverse=True)
+        theme_context = build_theme_context(rows)
         for row in rows:
             name = row["名称"]
             board = row["板块"]
@@ -608,8 +734,13 @@ def load_candidates(path: Path, score_records: list[dict[str, str]] | None = Non
                 append_score_record(score_records, row, status="硬性剔除", reject_reason="关键行情字段缺失")
                 continue
 
-            if not (10 <= price <= 60):
-                append_score_record(score_records, row, status="硬性剔除", reject_reason="价格不在10-60元")
+            if not (PRICE_MIN <= price <= PRICE_MAX):
+                append_score_record(
+                    score_records,
+                    row,
+                    status="硬性剔除",
+                    reject_reason=f"价格不在{PRICE_MIN}-{PRICE_MAX}元",
+                )
                 continue
             amount_rank_pct = amount_percentile(amount, sorted_amounts_desc)
             if amount < amount_floor:
@@ -621,17 +752,8 @@ def load_candidates(path: Path, score_records: list[dict[str, str]] | None = Non
                     amount_rank_pct=amount_rank_pct,
                 )
                 continue
-            if not (1.2 <= amplitude <= 5.0):
-                append_score_record(score_records, row, status="硬性剔除", reject_reason="振幅不在1.2%-5.0%")
-                continue
-            if not (2 <= turnover <= 7.5):
-                append_score_record(score_records, row, status="硬性剔除", reject_reason="换手率不在2%-7.5%")
-                continue
-            if not (1.0 <= volume_ratio <= 2.5):
-                append_score_record(score_records, row, status="硬性剔除", reject_reason="日总量比不在1.0-2.5")
-                continue
-            if not (0.3 <= pct_chg <= 3.2):
-                append_score_record(score_records, row, status="硬性剔除", reject_reason="涨跌幅不在+0.3%到+3.2%")
+            if not (0 <= pct_chg <= 5):
+                append_score_record(score_records, row, status="硬性剔除", reject_reason="涨跌幅不在0%到5%")
                 continue
             intraday_range = day_high - day_low
             if intraday_range <= 0:
@@ -642,53 +764,13 @@ def load_candidates(path: Path, score_records: list[dict[str, str]] | None = Non
             day_high_space_pct = (day_high / price - 1) * 100 if price else 0
             open_to_price_pct = (price / day_open - 1) * 100 if day_open else 0
 
-            # 复盘紫光股份、金风科技后新增：高开低走且收在日内低位的票，
-            # 即使成交额/换手达标，也不适合做次日冲高卖的尾盘优先票。
-            if close_position_pct < 55:
+            # 只把典型高开低走且收在低位作为硬剔除；一般日内位置不足只扣分降级。
+            if open_to_price_pct <= -1.2 and close_position_pct < 45:
                 append_score_record(
                     score_records,
                     row,
                     status="硬性剔除",
-                    reject_reason="收盘/当前价处于日内振幅55%以下",
-                    close_position_pct=close_position_pct,
-                    high_pullback_pct=high_pullback_pct,
-                    day_high_space_pct=day_high_space_pct,
-                    open_to_price_pct=open_to_price_pct,
-                    amount_rank_pct=amount_rank_pct,
-                )
-                continue
-            if high_pullback_pct <= -1.5:
-                append_score_record(
-                    score_records,
-                    row,
-                    status="硬性剔除",
-                    reject_reason="距离日内高点回落超过1.5%",
-                    close_position_pct=close_position_pct,
-                    high_pullback_pct=high_pullback_pct,
-                    day_high_space_pct=day_high_space_pct,
-                    open_to_price_pct=open_to_price_pct,
-                    amount_rank_pct=amount_rank_pct,
-                )
-                continue
-            if day_high_space_pct < 1.0:
-                append_score_record(
-                    score_records,
-                    row,
-                    status="硬性剔除",
-                    reject_reason="到日内高点空间低于1.0%",
-                    close_position_pct=close_position_pct,
-                    high_pullback_pct=high_pullback_pct,
-                    day_high_space_pct=day_high_space_pct,
-                    open_to_price_pct=open_to_price_pct,
-                    amount_rank_pct=amount_rank_pct,
-                )
-                continue
-            if open_to_price_pct <= -1.2:
-                append_score_record(
-                    score_records,
-                    row,
-                    status="硬性剔除",
-                    reject_reason="高开低走/开盘至当前跌幅超过1.2%",
+                    reject_reason="典型高开低走且收在低位",
                     close_position_pct=close_position_pct,
                     high_pullback_pct=high_pullback_pct,
                     day_high_space_pct=day_high_space_pct,
@@ -697,6 +779,7 @@ def load_candidates(path: Path, score_records: list[dict[str, str]] | None = Non
                 )
                 continue
             metrics = recent_position_metrics(row["交易所"], row["代码"], price)
+            theme_score, theme_detail = theme_leadership_score(row, theme_context)
             score, score_detail = score_candidate(
                 pct_chg=pct_chg,
                 amount=amount,
@@ -707,10 +790,18 @@ def load_candidates(path: Path, score_records: list[dict[str, str]] | None = Non
                 high_pullback_pct=high_pullback_pct,
                 day_high_space_pct=day_high_space_pct,
                 amount_rank_pct=amount_rank_pct,
+                theme_score=theme_score,
+                theme_detail=theme_detail,
                 day_low=day_low,
                 price=price,
                 metrics=metrics,
             )
+            if theme_score < 8:
+                score = min(score, 79)
+                score_detail = f"{score_detail}；主线不足封顶79"
+            if pct_chg > 3.2 or turnover > 7.5 or amplitude > 4.5:
+                score = min(score, 79)
+                score_detail = f"{score_detail}；执行条件不足封顶79"
             if not passes_position_filters(metrics, amplitude, high_pullback_pct):
                 append_score_record(
                     score_records,
@@ -724,6 +815,8 @@ def load_candidates(path: Path, score_records: list[dict[str, str]] | None = Non
                     day_high_space_pct=day_high_space_pct,
                     open_to_price_pct=open_to_price_pct,
                     amount_rank_pct=amount_rank_pct,
+                    theme_score=theme_score,
+                    theme_detail=theme_detail,
                     metrics=metrics,
                 )
                 continue
@@ -738,6 +831,8 @@ def load_candidates(path: Path, score_records: list[dict[str, str]] | None = Non
                 day_high_space_pct=day_high_space_pct,
                 open_to_price_pct=open_to_price_pct,
                 amount_rank_pct=amount_rank_pct,
+                theme_score=theme_score,
+                theme_detail=theme_detail,
                 metrics=metrics,
             )
             reason = build_reason(price, amount, amplitude, turnover, pct_chg, volume_ratio)
@@ -761,6 +856,8 @@ def load_candidates(path: Path, score_records: list[dict[str, str]] | None = Non
                     day_high=day_high,
                     day_low=day_low,
                     prev_close=prev_close,
+                    theme_score=theme_score,
+                    theme_detail=theme_detail,
                     score=score,
                     score_detail=score_detail,
                     reason=reason,
@@ -793,6 +890,8 @@ def write_candidates(path: Path, candidates: list[Candidate]) -> None:
         "量比",
         "市盈率",
         "市净率",
+        "主线评分",
+        "主线明细",
         "评分",
         "评分明细",
         "优先级",
@@ -824,6 +923,8 @@ def write_candidates(path: Path, candidates: list[Candidate]) -> None:
                     "量比": f"{item.volume_ratio:.2f}",
                     "市盈率": "" if item.pe is None else f"{item.pe:.2f}",
                     "市净率": "" if item.pb is None else f"{item.pb:.2f}",
+                    "主线评分": f"{item.theme_score:.2f}",
+                    "主线明细": item.theme_detail,
                     "评分": f"{item.score:.2f}",
                     "评分明细": item.score_detail,
                     "优先级": item.priority,

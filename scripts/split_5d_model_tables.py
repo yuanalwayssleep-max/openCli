@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from train_5d_direction_model import CORE_FEATURE_COLUMNS, DEFAULT_SAMPLE_CSV
+from train_5d_direction_model import CORE_FEATURE_COLUMNS, CORE_V14_FEATURE_COLUMNS, DEFAULT_SAMPLE_CSV
 from train_5d_return_model import DEFAULT_OUTPUT_DIR
 
 
@@ -75,7 +75,8 @@ def main() -> None:
     df = df.sort_values(["代码", "日期"]).reset_index(drop=True)
 
     base_cols = keep_existing_columns(df, BASE_COLUMNS)
-    feature_cols = keep_existing_columns(df, ["日期", "代码"] + CORE_FEATURE_COLUMNS + CALENDAR_CONTEXT_COLUMNS)
+    model_feature_cols = CORE_FEATURE_COLUMNS + [col for col in CORE_V14_FEATURE_COLUMNS if col not in CORE_FEATURE_COLUMNS]
+    feature_cols = keep_existing_columns(df, ["日期", "代码"] + model_feature_cols + CALENDAR_CONTEXT_COLUMNS)
 
     base_df = df[base_cols].copy()
     feature_df = df[feature_cols].copy()

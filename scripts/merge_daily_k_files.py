@@ -17,7 +17,7 @@ from train_5d_return_model import (
     enrich_one_stock,
     load_meta,
 )
-from train_5d_direction_model import CORE_FEATURE_COLUMNS
+from train_5d_direction_model import CORE_FEATURE_COLUMNS, CORE_V14_FEATURE_COLUMNS
 
 
 DEFAULT_OUTPUT_FILE = DEFAULT_OUTPUT_DIR / "00_5日涨跌方向预测样本明细.csv"
@@ -79,7 +79,8 @@ LABEL_OUTPUT_COLUMNS = [
 
 def keep_core_columns(df: pd.DataFrame) -> pd.DataFrame:
     keep_cols = []
-    for col in BASE_OUTPUT_COLUMNS + CORE_FEATURE_COLUMNS + CALENDAR_CONTEXT_COLUMNS + LABEL_OUTPUT_COLUMNS:
+    feature_cols = CORE_FEATURE_COLUMNS + [col for col in CORE_V14_FEATURE_COLUMNS if col not in CORE_FEATURE_COLUMNS]
+    for col in BASE_OUTPUT_COLUMNS + feature_cols + CALENDAR_CONTEXT_COLUMNS + LABEL_OUTPUT_COLUMNS:
         if col in df.columns and col not in keep_cols:
             keep_cols.append(col)
     return df[keep_cols].copy()

@@ -11,6 +11,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="在修正后方向预测上增加观望/出手决策层")
     parser.add_argument("--detail-csv", required=True, help="10_个股预测结果_市场风险修正明细CSV")
     parser.add_argument("--output-prefix", required=True, help="输出文件前缀，不含扩展名")
+    parser.add_argument(
+        "--decision-policy",
+        choices=["legacy", "v16", "v17_daily_quota"],
+        default="v16",
+        help="信号决策策略：legacy=旧观望规则；v16=高置信低覆盖出手层；v17_daily_quota=每日低配额出手层",
+    )
+    parser.add_argument("--daily-min-signals", type=int, default=2, help="v17每日最少出手数")
+    parser.add_argument("--daily-max-signals", type=int, default=10, help="v17每日最多出手数")
     return parser.parse_args()
 
 
@@ -20,7 +28,7 @@ def pct(value: float) -> str:
     return f"{value:.2%}"
 
 
-def add_decision_layer(df: pd.DataFrame) -> pd.DataFrame:
+def add_legacy_decision_layer(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
     weak_rebound_uncertain = (
@@ -37,7 +45,6 @@ def add_decision_layer(df: pd.DataFrame) -> pd.DataFrame:
         & (out["连续弱势天数"] <= 1)
         & ((out["行业强跌比例_1pct_近5日变化"] < 0) | (out["当日平均涨跌幅_近5日变化"] > 0))
     )
-
     out["信号动作"] = "出手"
     out["观望原因"] = ""
     out.loc[weak_rebound_uncertain, "信号动作"] = "观望"
@@ -45,6 +52,108 @@ def add_decision_layer(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[weak_down_range_uncertain, "信号动作"] = "观望"
     out.loc[weak_down_range_uncertain, "观望原因"] = "弱势大跌但未继续恶化，方向分歧，观望"
     return out
+
+
+def add_v16_decision_layer(df: pd.DataFrame) -> pd.DataFrame:
+    """高置信低覆盖出手层。
+
+    v16不追求全股票覆盖，只在跨月回测中胜率更稳定的环境出手。
+    规则只使用锚点日已知字段和模型预测概率，不使用未来标签。
+    """
+    out = df.copy()
+    prob = pd.to_numeric(out["预测上涨概率"], errors="coerce")
+    confidence = (prob - 0.5).abs()
+    breadth = pd.to_numeric(out.get("当日上涨比例"), errors="coerce")
+    zz1000_20d_ret = pd.to_numeric(out.get("中证1000_20日涨跌幅"), errors="coerce")
+    pred_up = out["修正后预测涨跌"].eq("上涨")
+
+    overheat_up_continuation = (
+        pred_up
+        & out["市场风险标签"].eq("过热回落高")
+        & (confidence >= 0.15)
+        & (breadth >= 0.70)
+        & (zz1000_20d_ret >= 0.065)
+    )
+    weak_repair_up = (
+        pred_up
+        & out["市场风险标签"].eq("弱势延续高")
+        & (confidence >= 0.15)
+        & (breadth >= 0.35)
+    )
+    panic_weak_rebound_up = (
+        pred_up
+        & out["市场风险标签"].eq("恐慌释放高+弱势延续高")
+        & (confidence >= 0.15)
+    )
+
+    out["信号动作"] = "观望"
+    out["观望原因"] = "v16未满足高置信出手条件"
+    out["信号规则"] = ""
+
+    out.loc[overheat_up_continuation, "信号动作"] = "出手"
+    out.loc[overheat_up_continuation, "观望原因"] = ""
+    out.loc[overheat_up_continuation, "信号规则"] = "v16_过热强势延续上涨"
+
+    out.loc[weak_repair_up, "信号动作"] = "出手"
+    out.loc[weak_repair_up, "观望原因"] = ""
+    out.loc[weak_repair_up, "信号规则"] = "v16_弱势修复上涨"
+
+    out.loc[panic_weak_rebound_up, "信号动作"] = "出手"
+    out.loc[panic_weak_rebound_up, "观望原因"] = ""
+    out.loc[panic_weak_rebound_up, "信号规则"] = "v16_恐慌弱势反抽上涨"
+    return out
+
+
+def add_v17_daily_quota_layer(df: pd.DataFrame, daily_min: int, daily_max: int) -> pd.DataFrame:
+    """每日低配额出手层。
+
+    先选v16高胜率信号；如果当天不足daily_min，再用全市场最高置信度样本补足。
+    """
+    if daily_min < 0 or daily_max <= 0 or daily_min > daily_max:
+        raise ValueError("v17要求 0 <= daily-min-signals <= daily-max-signals 且 daily-max-signals > 0")
+
+    out = add_v16_decision_layer(df)
+    out["_v16信号规则"] = out["信号规则"].astype(str)
+    prob = pd.to_numeric(out["预测上涨概率"], errors="coerce")
+    out["_信号置信度"] = (prob - 0.5).abs()
+    out["信号动作"] = "观望"
+    out["观望原因"] = "v17未入选每日出手配额"
+    out["信号规则"] = ""
+
+    selected_indices: list[int] = []
+    for _, day in out.groupby("锚点日期", sort=True):
+        v16_candidates = day[day["_v16信号规则"].str.startswith("v16_")].copy()
+        v16_selected = v16_candidates.sort_values(
+            ["预测上涨概率", "_信号置信度"],
+            ascending=[False, False],
+        ).head(daily_max)
+        chosen = list(v16_selected.index)
+
+        if len(chosen) < daily_min:
+            remaining = day.drop(index=chosen, errors="ignore")
+            fill_count = daily_min - len(chosen)
+            fillers = remaining.sort_values("_信号置信度", ascending=False).head(fill_count)
+            chosen.extend(list(fillers.index))
+
+        selected_indices.extend(chosen)
+
+    out.loc[selected_indices, "信号动作"] = "出手"
+    out.loc[selected_indices, "信号规则"] = out.loc[selected_indices, "_v16信号规则"]
+    empty_rule = out.loc[selected_indices, "信号规则"].astype(str).eq("")
+    filler_indices = out.loc[selected_indices].loc[empty_rule].index
+    out.loc[filler_indices, "信号规则"] = "v17_每日最高置信补充"
+    out.loc[selected_indices, "观望原因"] = ""
+    return out.drop(columns=["_信号置信度", "_v16信号规则"], errors="ignore")
+
+
+def add_decision_layer(df: pd.DataFrame, policy: str, daily_min: int, daily_max: int) -> pd.DataFrame:
+    if policy == "legacy":
+        return add_legacy_decision_layer(df)
+    if policy == "v16":
+        return add_v16_decision_layer(df)
+    if policy == "v17_daily_quota":
+        return add_v17_daily_quota_layer(df, daily_min, daily_max)
+    raise ValueError(f"未知信号决策策略: {policy}")
 
 
 def summarize(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
@@ -91,7 +200,7 @@ def main() -> None:
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(detail_path, encoding="utf-8-sig", dtype={"代码": str})
-    out = add_decision_layer(df)
+    out = add_decision_layer(df, args.decision_policy, args.daily_min_signals, args.daily_max_signals)
 
     detail_out = output_prefix.with_name(output_prefix.name + "_信号决策明细.csv")
     total_out = output_prefix.with_name(output_prefix.name + "_信号决策总体.csv")
