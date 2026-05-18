@@ -13,12 +13,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-prefix", required=True, help="输出文件前缀，不含扩展名")
     parser.add_argument(
         "--decision-policy",
-        choices=["legacy", "v16", "v17_daily_quota"],
+        choices=["legacy", "v16", "v17_confidence", "v18_confidence_topn", "v17_daily_quota"],
         default="v16",
-        help="信号决策策略：legacy=旧观望规则；v16=高置信低覆盖出手层；v17_daily_quota=每日低配额出手层",
+        help="信号决策策略：legacy=旧观望规则；v16=高置信低覆盖出手层；v17_confidence=概率/修正原因低覆盖出手层；v18_confidence_topn=每日限额版v17；v17_daily_quota=每日低配额出手层",
     )
     parser.add_argument("--daily-min-signals", type=int, default=2, help="v17每日最少出手数")
-    parser.add_argument("--daily-max-signals", type=int, default=10, help="v17每日最多出手数")
+    parser.add_argument("--daily-max-signals", type=int, default=10, help="v17/v18每日最多出手数")
     return parser.parse_args()
 
 
@@ -104,6 +104,85 @@ def add_v16_decision_layer(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_v17_confidence_layer(df: pd.DataFrame) -> pd.DataFrame:
+    """概率/修正原因低覆盖出手层。
+
+    v16在部分月份过严，容易完全不出手。v17_confidence保留低覆盖原则，
+    但增加两类更可解释的出手条件：高上涨概率，以及v15识别出的恐慌洗盘修正。
+    """
+    out = add_v16_decision_layer(df)
+    prob = pd.to_numeric(out["预测上涨概率"], errors="coerce")
+    industry_up = pd.to_numeric(out.get("行业上涨比例"), errors="coerce")
+    pred_up = out["修正后预测涨跌"].eq("上涨")
+    risk_label = out["市场风险标签"].astype(str)
+    correction_reason = out.get("修正原因", pd.Series("", index=out.index)).fillna("").astype(str)
+
+    high_prob_up = pred_up & (prob >= 0.70)
+    strong_industry_up = (
+        pred_up
+        & (prob >= 0.62)
+        & risk_label.isin(["常规环境", "过热回落高"])
+        & (industry_up >= 0.50)
+    )
+    panic_wash_up = (
+        pred_up
+        & risk_label.eq("恐慌释放高")
+        & correction_reason.str.contains("上升趋势中恐慌洗盘", regex=False)
+    )
+
+    out.loc[high_prob_up, "信号动作"] = "出手"
+    out.loc[high_prob_up, "观望原因"] = ""
+    out.loc[high_prob_up, "信号规则"] = "v17_高概率上涨"
+
+    out.loc[strong_industry_up, "信号动作"] = "出手"
+    out.loc[strong_industry_up, "观望原因"] = ""
+    out.loc[strong_industry_up, "信号规则"] = "v17_行业共振上涨"
+
+    out.loc[panic_wash_up, "信号动作"] = "出手"
+    out.loc[panic_wash_up, "观望原因"] = ""
+    out.loc[panic_wash_up, "信号规则"] = "v17_恐慌洗盘修正上涨"
+    return out
+
+
+def add_v18_confidence_topn_layer(df: pd.DataFrame, daily_max: int) -> pd.DataFrame:
+    """每日限额版v17。
+
+    先用v17_confidence生成候选，再按规则优先级和上涨概率排序，每天最多保留daily_max个信号。
+    """
+    if daily_max <= 0:
+        raise ValueError("v18要求 daily-max-signals > 0")
+
+    out = add_v17_confidence_layer(df)
+    candidates = out[out["信号动作"].eq("出手")].copy()
+    out["信号动作"] = "观望"
+    out["观望原因"] = "v18未入选每日TopN"
+
+    if candidates.empty:
+        out["信号规则"] = ""
+        return out
+
+    priority = {
+        "v17_高概率上涨": 1,
+        "v17_行业共振上涨": 2,
+        "v17_恐慌洗盘修正上涨": 3,
+        "v16_过热强势延续上涨": 4,
+        "v16_弱势修复上涨": 5,
+        "v16_恐慌弱势反抽上涨": 6,
+    }
+    candidates["_规则优先级"] = candidates["信号规则"].map(priority).fillna(99)
+    candidates["_预测上涨概率"] = pd.to_numeric(candidates["预测上涨概率"], errors="coerce")
+    selected_indices: list[int] = []
+    for _, day in candidates.groupby("锚点日期", sort=True):
+        selected = day.sort_values(["_规则优先级", "_预测上涨概率"], ascending=[True, False]).head(daily_max)
+        selected_indices.extend(list(selected.index))
+
+    out.loc[selected_indices, "信号动作"] = "出手"
+    out.loc[selected_indices, "观望原因"] = ""
+    out.loc[selected_indices, "信号规则"] = candidates.loc[selected_indices, "信号规则"]
+    out.loc[out["信号动作"].eq("观望"), "信号规则"] = ""
+    return out
+
+
 def add_v17_daily_quota_layer(df: pd.DataFrame, daily_min: int, daily_max: int) -> pd.DataFrame:
     """每日低配额出手层。
 
@@ -151,6 +230,10 @@ def add_decision_layer(df: pd.DataFrame, policy: str, daily_min: int, daily_max:
         return add_legacy_decision_layer(df)
     if policy == "v16":
         return add_v16_decision_layer(df)
+    if policy == "v17_confidence":
+        return add_v17_confidence_layer(df)
+    if policy == "v18_confidence_topn":
+        return add_v18_confidence_topn_layer(df, daily_max)
     if policy == "v17_daily_quota":
         return add_v17_daily_quota_layer(df, daily_min, daily_max)
     raise ValueError(f"未知信号决策策略: {policy}")

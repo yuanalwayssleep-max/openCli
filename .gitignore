@@ -1,5 +1,6 @@
 node_modules/
 configs/
+.venv/
 __pycache__/
 *.pyc
 .DS_Store

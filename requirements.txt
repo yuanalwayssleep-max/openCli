@@ -1,0 +1,11 @@
+# Core data / modeling stack
+numpy
+pandas
+scikit-learn
+
+# HTTP and data fetching
+requests
+urllib3
+akshare
+baostock
+tushare
